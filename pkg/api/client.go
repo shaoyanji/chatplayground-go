@@ -49,12 +49,19 @@ type ModelInfo struct {
 type Client struct {
 	HTTPClient *http.Client
 	Token      string
+	ChatID     string
+	Messages   []Message
 }
 
 func NewClient() *Client {
 	return &Client{
 		HTTPClient: &http.Client{Timeout: 120 * time.Second},
 	}
+}
+
+func (c *Client) ResetSession() {
+	c.ChatID = ""
+	c.Messages = nil
 }
 
 func (c *Client) GetModels() ([]ModelInfo, error) {
@@ -237,13 +244,18 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 		}
 	}
 
+	// Add user message to history
+	c.Messages = append(c.Messages, Message{Role: "user", Content: userContent})
+	recentMessages := c.Messages
+	if len(recentMessages) > 20 {
+		recentMessages = recentMessages[len(recentMessages)-20:]
+	}
+
 	payload := map[string]interface{}{
-		"messages": []Message{
-			{Role: "user", Content: userContent},
-		},
+		"messages":       recentMessages,
 		"model":          formattedModel,
 		"botId":          botId,
-		"chatId":         "",
+		"chatId":         c.ChatID,
 		"isRegenerate":   false,
 		"promptTemplate": nil,
 		"fileUrl":        nil,
@@ -253,11 +265,17 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
+		if len(c.Messages) > 0 {
+			c.Messages = c.Messages[:len(c.Messages)-1]
+		}
 		return "", err
 	}
 
 	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(payloadBytes))
 	if err != nil {
+		if len(c.Messages) > 0 {
+			c.Messages = c.Messages[:len(c.Messages)-1]
+		}
 		return "", err
 	}
 
@@ -270,6 +288,9 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		if len(c.Messages) > 0 {
+			c.Messages = c.Messages[:len(c.Messages)-1]
+		}
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -281,9 +302,13 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 			c.Token = newToken
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", newToken))
 			req.Header.Set("Cookie", fmt.Sprintf("__session=%s", newToken))
+			req.Body = io.NopCloser(bytes.NewBuffer(payloadBytes))
 			resp.Body.Close()
 			resp, err = c.HTTPClient.Do(req)
 			if err != nil {
+				if len(c.Messages) > 0 {
+					c.Messages = c.Messages[:len(c.Messages)-1]
+				}
 				return "", err
 			}
 			defer resp.Body.Close()
@@ -291,6 +316,9 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if len(c.Messages) > 0 {
+			c.Messages = c.Messages[:len(c.Messages)-1]
+		}
 		bodyErr, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == http.StatusUnauthorized {
 			return "", fmt.Errorf("authentication expired (401). Please run 'chatplayground-go login'")
@@ -298,6 +326,7 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyErr))
 	}
 
+	chatIdExtractRegex := regexp.MustCompile(`CHAT_ID:([a-zA-Z0-9_-]{15,50})`)
 	chatIdRegex := regexp.MustCompile(`CHAT_ID:[a-zA-Z0-9_-]{15,50}\n?`)
 	chatIdEndRegex := regexp.MustCompile(`CHAT_ID:[a-zA-Z0-9_-]*$`)
 
@@ -308,6 +337,9 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			chunk := string(buf[:n])
+			if match := chatIdExtractRegex.FindStringSubmatch(chunk); len(match) > 1 {
+				c.ChatID = match[1]
+			}
 			cleanChunk := chatIdRegex.ReplaceAllString(chunk, "")
 			cleanChunk = chatIdEndRegex.ReplaceAllString(cleanChunk, "")
 			if cleanChunk != "" {
@@ -321,9 +353,15 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 			if err == io.EOF {
 				break
 			}
+			if len(c.Messages) > 0 {
+				c.Messages = c.Messages[:len(c.Messages)-1]
+			}
 			return fullText.String(), err
 		}
 	}
+
+	// Save assistant response to conversation history for multi-turn context
+	c.Messages = append(c.Messages, Message{Role: "assistant", Content: fullText.String()})
 
 	return fullText.String(), nil
 }

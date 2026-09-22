@@ -53,13 +53,13 @@ type Model struct {
 
 func InitialModel() Model {
 	ti := textinput.New()
-	ti.Placeholder = "Type your prompt... ([Tab] Switch model, /clear to reset, [Esc] Quit)"
+	ti.Placeholder = "Type prompt... ([Tab] Switch model, /new New thread, [Esc] Quit)"
 	ti.Focus()
 	ti.CharLimit = 2048
 	ti.Width = 80
 
 	vp := viewport.New(80, 20)
-	vp.SetContent("Welcome to ChatPlayground TUI!\nPress [Tab] to cycle models. Type your message and hit Enter.\n\n")
+	vp.SetContent("Welcome to ChatPlayground TUI!\nMulti-turn conversation persistence enabled. Context is retained in the same thread.\nCommands: /new (start new thread), /clear (reset conversation).\n\n")
 
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
@@ -139,9 +139,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			if input == "/clear" {
+			if input == "/clear" || input == "/new" || input == "/reset" {
 				m.conversation = ""
-				m.viewport.SetContent("Conversation cleared.\n\n")
+				m.client.ResetSession()
+				m.viewport.SetContent("Conversation cleared and new thread started.\n\n")
 				m.textInput.Reset()
 				return m, nil
 			}
@@ -204,9 +205,19 @@ func (m Model) renderContent(in string) string {
 }
 
 func (m Model) View() string {
-	status := fmt.Sprintf(" %s Model: %s  |  [Tab] Switch Model  |  [Esc] Quit ",
+	threadBadge := ""
+	if m.client != nil && m.client.ChatID != "" {
+		id := m.client.ChatID
+		if len(id) > 16 {
+			id = id[:16] + "..."
+		}
+		threadBadge = fmt.Sprintf("  |  Thread: %s", titleStyle.Render(id))
+	}
+
+	status := fmt.Sprintf(" %s Model: %s%s  |  [Tab] Switch Model  |  /new Reset  |  [Esc] Quit ",
 		titleStyle.Render("ChatPlayground"),
 		modelTagStyle.Render(m.currentModel),
+		threadBadge,
 	)
 
 	return fmt.Sprintf(
