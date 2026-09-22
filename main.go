@@ -11,6 +11,7 @@ import (
 	"github.com/shaoyanji/chatplayground-go/pkg/api"
 	"github.com/shaoyanji/chatplayground-go/pkg/auth"
 	"github.com/shaoyanji/chatplayground-go/pkg/benchmark"
+	"github.com/shaoyanji/chatplayground-go/pkg/repl"
 	"github.com/shaoyanji/chatplayground-go/pkg/tui"
 )
 
@@ -32,6 +33,8 @@ USAGE:
   chatplayground-go <command> [options]
 
 COMMANDS:
+  chat, repl                    Interactive streaming chat in your terminal (multi-turn context)
+  tui                           Launch interactive Bubble Tea terminal UI
   login [token]                 Log in via stealth browser or save session token
   models, list                  List all available models on ChatPlayground
   compare, benchmark <prompt>   Run parallel benchmark across Claude Sonnet 5, DeepSeek R1 & Gemini Flash
@@ -210,6 +213,14 @@ func main() {
 		}
 		fmt.Println("\nChat:  chatplayground-go -m <botId> \"prompt\"")
 		fmt.Println("Image: chatplayground-go image \"prompt\"")
+		return
+	}
+
+	// Command: chat / repl
+	if firstArg == "chat" || firstArg == "repl" {
+		if err := repl.Start(modelFlag); err != nil {
+			fmt.Printf("Chat error: %v\n", err)
+		}
 		return
 	}
 

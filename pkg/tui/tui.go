@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -9,14 +10,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
 	"github.com/shaoyanji/chatplayground-go/pkg/api"
 )
 
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#7D56F4")).
-			MarginBottom(1)
+			Foreground(lipgloss.Color("#7D56F4"))
 
 	modelTagStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -33,8 +34,9 @@ var (
 				Foreground(lipgloss.Color("#00D7D7"))
 )
 
-type errMsg error
+type chunkMsg string
 type doneMsg string
+type errMsg error
 
 type Model struct {
 	viewport     viewport.Model
@@ -48,22 +50,30 @@ type Model struct {
 	historyIdx   int
 	conversation string
 	streaming    bool
+	streamChan   chan tea.Msg
 	err          error
 }
 
 func InitialModel() Model {
+	width := 80
+	height := 24
+	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil && w > 20 && h > 10 {
+		width = w
+		height = h
+	}
+
 	ti := textinput.New()
 	ti.Placeholder = "Type prompt... ([Tab] Switch model, /new New thread, [Esc] Quit)"
 	ti.Focus()
-	ti.CharLimit = 2048
-	ti.Width = 80
+	ti.CharLimit = 4096
+	ti.Width = width - 4
 
-	vp := viewport.New(80, 20)
+	vp := viewport.New(width, height-6)
 	vp.SetContent("Welcome to ChatPlayground TUI!\nMulti-turn conversation persistence enabled. Context is retained in the same thread.\nCommands: /new (start new thread), /clear (reset conversation).\n\n")
 
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(80),
+		glamour.WithWordWrap(width-4),
 	)
 
 	models := []string{
@@ -94,14 +104,21 @@ func (m Model) Init() tea.Cmd {
 	return textinput.Blink
 }
 
+func waitForChunk(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
 	)
-
-	m.textInput, tiCmd = m.textInput.Update(msg)
-	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -152,25 +169,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Reset()
 			m.streaming = true
 
-			// Append user message safely (no Builder copy panic)
-			m.conversation += fmt.Sprintf("\n%s %s\n\n", userPrefixStyle.Render("You:"), input)
-			m.viewport.SetContent(m.renderContent(m.conversation))
+			// Append user message and prepare assistant prefix
+			m.conversation += fmt.Sprintf("\n%s %s\n\n%s ",
+				userPrefixStyle.Render("You:"),
+				input,
+				assistantPrefixStyle.Render(m.currentModel+":"),
+			)
+			m.viewport.SetContent(m.conversation)
 			m.viewport.GotoBottom()
 
-			// Launch streaming query
+			ch := make(chan tea.Msg, 100)
+			m.streamChan = ch
 			currentModel := m.currentModel
-			return m, func() tea.Msg {
-				fullText, err := m.client.StreamQuery(currentModel, input, "", nil)
+
+			go func() {
+				fullText, err := m.client.StreamQuery(currentModel, input, "", func(chunk string) {
+					ch <- chunkMsg(chunk)
+				})
 				if err != nil {
-					return errMsg(err)
+					ch <- errMsg(err)
+				} else {
+					ch <- doneMsg(fullText)
 				}
-				return doneMsg(fullText)
-			}
+				close(ch)
+			}()
+
+			return m, waitForChunk(ch)
 		}
+
+	case chunkMsg:
+		m.conversation += string(msg)
+		m.viewport.SetContent(m.conversation)
+		m.viewport.GotoBottom()
+		return m, waitForChunk(m.streamChan)
 
 	case doneMsg:
 		m.streaming = false
-		m.conversation += fmt.Sprintf("%s\n%s\n\n", assistantPrefixStyle.Render(m.currentModel+":"), string(msg))
+		m.conversation += "\n\n"
 		m.viewport.SetContent(m.renderContent(m.conversation))
 		m.viewport.GotoBottom()
 		return m, nil
@@ -187,9 +222,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Height = msg.Height - 6
 		m.textInput.Width = msg.Width - 4
 		if m.glamourRend != nil {
-			m.glamourRend, _ = glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(msg.Width-2))
+			m.glamourRend, _ = glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(msg.Width-4))
 		}
 	}
+
+	m.textInput, tiCmd = m.textInput.Update(msg)
+	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	return m, tea.Batch(tiCmd, vpCmd)
 }
@@ -214,10 +252,16 @@ func (m Model) View() string {
 		threadBadge = fmt.Sprintf("  |  Thread: %s", titleStyle.Render(id))
 	}
 
-	status := fmt.Sprintf(" %s Model: %s%s  |  [Tab] Switch Model  |  /new Reset  |  [Esc] Quit ",
+	streamingBadge := ""
+	if m.streaming {
+		streamingBadge = "  \033[1;33m[● Generating...]\033[0m"
+	}
+
+	status := fmt.Sprintf(" %s Model: %s%s%s  |  [Tab] Model  |  /new Reset  |  [Esc] Quit ",
 		titleStyle.Render("ChatPlayground"),
 		modelTagStyle.Render(m.currentModel),
 		threadBadge,
+		streamingBadge,
 	)
 
 	return fmt.Sprintf(
