@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/shaoyanji/chatplayground-go/pkg/api"
+	"github.com/shaoyanji/chatplayground-go/pkg/auth"
 )
 
 type Result struct {
@@ -18,7 +19,14 @@ type Result struct {
 
 func RunComparison(prompt string, models []string) []Result {
 	if len(models) == 0 {
-		models = []string{"claude-sonnet-5-l", "deepseek-r1", "gpt-5.6-sol"}
+		models = []string{"claude-sonnet-5-l", "glm-5.3-flash", "deepseek-v4-pro"}
+	}
+
+	// Pre-fetch token once before spawning concurrent goroutines to avoid token race condition
+	sharedToken, err := auth.GetValidToken()
+	if err != nil {
+		fmt.Printf("\033[1;31mAuthentication error: %v\033[0m\n", err)
+		return nil
 	}
 
 	resultsChan := make(chan Result, len(models))
@@ -27,21 +35,23 @@ func RunComparison(prompt string, models []string) []Result {
 	fmt.Printf("\n\033[1;36m🏁 Starting Parallel Multi-Model Benchmark (%d models)\033[0m\n", len(models))
 	fmt.Printf("Prompt: %s\n\n", prompt)
 
-	client := api.NewClient()
-
 	for _, m := range models {
 		wg.Add(1)
 		go func(modelName string) {
 			defer wg.Done()
+			// Each goroutine has its own isolated client instance with pre-shared token
+			threadClient := api.NewClient()
+			threadClient.Token = sharedToken
+
 			start := time.Now()
-			out, err := client.StreamQuery(modelName, prompt, "", nil)
+			out, queryErr := threadClient.StreamQuery(modelName, prompt, "", nil)
 			duration := time.Since(start)
 
 			resultsChan <- Result{
 				Model:    modelName,
 				Duration: duration,
 				Output:   out,
-				Error:    err,
+				Error:    queryErr,
 			}
 		}(m)
 	}

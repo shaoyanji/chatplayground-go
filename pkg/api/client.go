@@ -57,6 +57,26 @@ func NewClient() *Client {
 	}
 }
 
+func (c *Client) GetModels() ([]ModelInfo, error) {
+	req, err := http.NewRequest("GET", "https://app.chatplayground.ai/api/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var models []ModelInfo
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		return nil, err
+	}
+	return models, nil
+}
+
 func (c *Client) UploadImage(filePathOrUrl string) (string, error) {
 	if strings.HasPrefix(filePathOrUrl, "http://") || strings.HasPrefix(filePathOrUrl, "https://") {
 		return filePathOrUrl, nil
@@ -124,33 +144,86 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 		}
 	}
 
-	// Model normalization
-	formattedModel := "anthropic/claude-sonnet-5"
-	botId := "claude-sonnet-5-l"
+	// Model normalization (default: gemini-3.8-flash-l for maximum speed)
+	formattedModel := "google/gemini-3.8-flash"
+	botId := "gemini-3.8-flash-l"
 	endpoint := "https://app.chatplayground.ai/api/chat/azure"
 
 	cleanModel := strings.ToLower(strings.TrimSpace(model))
 	switch {
-	case strings.Contains(cleanModel, "deepseek") || cleanModel == "r1":
+	// GLM 5.3 models (Z.ai) - Pareto frontier
+	case strings.Contains(cleanModel, "glm") || cleanModel == "z-ai" || cleanModel == "zai":
+		botId = "glm-5.3-flash"
+		formattedModel = "z-ai/glm-5.3-flash"
+		endpoint = "https://app.chatplayground.ai/api/chat/lmsys"
+
+	// DeepSeek V4 Flash
+	case strings.Contains(cleanModel, "v4-flash") || strings.Contains(cleanModel, "deepseek-flash"):
+		botId = "deepseek-v4-flash"
+		formattedModel = "deepseek/deepseek-v4-flash"
+		endpoint = "https://app.chatplayground.ai/api/chat/azure"
+
+	// DeepSeek R1 (reasoner with think tags)
+	case strings.Contains(cleanModel, "r1") || strings.Contains(cleanModel, "reasoner"):
 		botId = "deepseek-r1"
 		formattedModel = "deepseek/deepseek-r1-0528"
+		endpoint = "https://app.chatplayground.ai/api/chat/lmsys"
+
+	// DeepSeek V4 Pro (default for "deepseek", "v4") - fast frontier reasoning in lieu of r1
+	case strings.Contains(cleanModel, "deepseek") || strings.Contains(cleanModel, "v4"):
+		botId = "deepseek-v4-pro"
+		formattedModel = "deepseek/deepseek-v4-pro"
 		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-	case strings.Contains(cleanModel, "gpt-5") || cleanModel == "gpt" || cleanModel == "sol":
-		botId = "gpt-5.6-sol"
-		formattedModel = "openai/gpt-5.6-sol"
+
+	// Claude Sonnet 5
+	case strings.Contains(cleanModel, "claude") || strings.Contains(cleanModel, "sonnet"):
+		botId = "claude-sonnet-5-l"
+		formattedModel = "anthropic/claude-sonnet-5"
 		endpoint = "https://app.chatplayground.ai/api/chat/azure"
+
+	// Gemini 3.8 Flash
 	case strings.Contains(cleanModel, "gemini") || cleanModel == "flash":
 		botId = "gemini-3.8-flash-l"
 		formattedModel = "google/gemini-3.8-flash"
 		endpoint = "https://app.chatplayground.ai/api/chat/azure"
+
+	// OpenAI GPT-5.6 Sol
+	case strings.Contains(cleanModel, "gpt") || strings.Contains(cleanModel, "sol"):
+		botId = "gpt-5.6-sol"
+		formattedModel = "openai/gpt-5.6-sol"
+		endpoint = "https://app.chatplayground.ai/api/chat/azure"
+
+	// Grok 4.6
 	case strings.Contains(cleanModel, "grok"):
 		botId = "grok-4.6"
 		formattedModel = "xai/grok-4.6"
 		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-	default:
-		botId = "claude-sonnet-5-l"
-		formattedModel = "anthropic/claude-sonnet-5"
+
+	// LLaMA 4 Maverick
+	case strings.Contains(cleanModel, "llama") || strings.Contains(cleanModel, "maverick"):
+		botId = "llama-4-maverick"
+		formattedModel = "meta/llama-4-maverick"
 		endpoint = "https://app.chatplayground.ai/api/chat/azure"
+
+	// Qwen 3.8 Max
+	case strings.Contains(cleanModel, "qwen"):
+		botId = "qwen3.8-max"
+		formattedModel = "qwen/qwen3.8-max"
+		endpoint = "https://app.chatplayground.ai/api/chat/azure"
+
+	default:
+		if cleanModel == "" {
+			botId = "gemini-3.8-flash-l"
+			formattedModel = "google/gemini-3.8-flash"
+			endpoint = "https://app.chatplayground.ai/api/chat/azure"
+		} else {
+			botId = cleanModel
+			formattedModel = cleanModel
+			endpoint = "https://app.chatplayground.ai/api/chat/azure"
+			if strings.Contains(cleanModel, "glm") || cleanModel == "deepseek-r1" {
+				endpoint = "https://app.chatplayground.ai/api/chat/lmsys"
+			}
+		}
 	}
 
 	var userContent interface{} = prompt
@@ -201,10 +274,26 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 	}
 	defer resp.Body.Close()
 
+	// Auto-retry once on 401 Unauthorized
+	if resp.StatusCode == http.StatusUnauthorized {
+		newToken, err := auth.RefreshViaBackgroundHelper()
+		if err == nil && newToken != "" {
+			c.Token = newToken
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", newToken))
+			req.Header.Set("Cookie", fmt.Sprintf("__session=%s", newToken))
+			resp.Body.Close()
+			resp, err = c.HTTPClient.Do(req)
+			if err != nil {
+				return "", err
+			}
+			defer resp.Body.Close()
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		bodyErr, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == http.StatusUnauthorized {
-			return "", fmt.Errorf("authentication expired (401)")
+			return "", fmt.Errorf("authentication expired (401). Please run 'chatplayground-go login'")
 		}
 		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyErr))
 	}
@@ -277,6 +366,21 @@ func (c *Client) GenerateImage(prompt string, size string, outputPath string) (s
 		return "", err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		newToken, err := auth.RefreshViaBackgroundHelper()
+		if err == nil && newToken != "" {
+			c.Token = newToken
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", newToken))
+			req.Header.Set("Cookie", fmt.Sprintf("__session=%s", newToken))
+			resp.Body.Close()
+			resp, err = c.HTTPClient.Do(req)
+			if err != nil {
+				return "", err
+			}
+			defer resp.Body.Close()
+		}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("image generation failed with status %d", resp.StatusCode)

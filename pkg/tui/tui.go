@@ -34,34 +34,32 @@ var (
 )
 
 type errMsg error
-
-type chunkMsg string
 type doneMsg string
 
 type Model struct {
-	viewport    viewport.Model
-	textInput   textinput.Model
-	glamourRend *glamour.TermRenderer
-	client      *api.Client
+	viewport     viewport.Model
+	textInput    textinput.Model
+	glamourRend  *glamour.TermRenderer
+	client       *api.Client
 	currentModel string
-	models      []string
-	modelIndex  int
-	history     []string
-	historyIdx  int
-	conversation strings.Builder
-	streaming   bool
-	err         error
+	models       []string
+	modelIndex   int
+	history      []string
+	historyIdx   int
+	conversation string
+	streaming    bool
+	err          error
 }
 
 func InitialModel() Model {
 	ti := textinput.New()
-	ti.Placeholder = "Type your prompt here... (Tab to switch model, Ctrl+C to quit)"
+	ti.Placeholder = "Type your prompt... ([Tab] Switch model, /clear to reset, [Esc] Quit)"
 	ti.Focus()
 	ti.CharLimit = 2048
 	ti.Width = 80
 
 	vp := viewport.New(80, 20)
-	vp.SetContent("Welcome to ChatPlayground TUI!\nPress Tab to change model. Type prompt and hit Enter.\n\n")
+	vp.SetContent("Welcome to ChatPlayground TUI!\nPress [Tab] to cycle models. Type your message and hit Enter.\n\n")
 
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
@@ -69,10 +67,12 @@ func InitialModel() Model {
 	)
 
 	models := []string{
-		"claude-sonnet-5-l",
-		"deepseek-r1",
-		"gpt-5.6-sol",
 		"gemini-3.8-flash-l",
+		"claude-sonnet-5-l",
+		"glm-5.3-flash",
+		"deepseek-v4-pro",
+		"deepseek-v4-flash",
+		"deepseek-r1",
 		"grok-4.6",
 	}
 
@@ -86,6 +86,7 @@ func InitialModel() Model {
 		modelIndex:   0,
 		history:      []string{},
 		historyIdx:   -1,
+		conversation: "",
 	}
 }
 
@@ -113,9 +114,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentModel = m.models[m.modelIndex]
 			return m, nil
 
+		case tea.KeyUp:
+			if len(m.history) > 0 && m.historyIdx > 0 {
+				m.historyIdx--
+				m.textInput.SetValue(m.history[m.historyIdx])
+				m.textInput.SetCursor(len(m.textInput.Value()))
+			}
+			return m, nil
+
+		case tea.KeyDown:
+			if len(m.history) > 0 && m.historyIdx < len(m.history)-1 {
+				m.historyIdx++
+				m.textInput.SetValue(m.history[m.historyIdx])
+				m.textInput.SetCursor(len(m.textInput.Value()))
+			} else if m.historyIdx == len(m.history)-1 {
+				m.historyIdx = len(m.history)
+				m.textInput.Reset()
+			}
+			return m, nil
+
 		case tea.KeyEnter:
 			input := strings.TrimSpace(m.textInput.Value())
 			if input == "" || m.streaming {
+				return m, nil
+			}
+
+			if input == "/clear" {
+				m.conversation = ""
+				m.viewport.SetContent("Conversation cleared.\n\n")
+				m.textInput.Reset()
 				return m, nil
 			}
 
@@ -124,9 +151,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Reset()
 			m.streaming = true
 
-			// Append user message
-			m.conversation.WriteString(fmt.Sprintf("\n%s %s\n\n", userPrefixStyle.Render("You:"), input))
-			m.viewport.SetContent(m.renderContent(m.conversation.String()))
+			// Append user message safely (no Builder copy panic)
+			m.conversation += fmt.Sprintf("\n%s %s\n\n", userPrefixStyle.Render("You:"), input)
+			m.viewport.SetContent(m.renderContent(m.conversation))
 			m.viewport.GotoBottom()
 
 			// Launch streaming query
@@ -142,15 +169,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.streaming = false
-		m.conversation.WriteString(fmt.Sprintf("%s\n%s\n\n", assistantPrefixStyle.Render(m.currentModel+":"), string(msg)))
-		m.viewport.SetContent(m.renderContent(m.conversation.String()))
+		m.conversation += fmt.Sprintf("%s\n%s\n\n", assistantPrefixStyle.Render(m.currentModel+":"), string(msg))
+		m.viewport.SetContent(m.renderContent(m.conversation))
 		m.viewport.GotoBottom()
 		return m, nil
 
 	case errMsg:
 		m.streaming = false
-		m.conversation.WriteString(fmt.Sprintf("\n\033[1;31mError: %v\033[0m\n\n", msg))
-		m.viewport.SetContent(m.conversation.String())
+		m.conversation += fmt.Sprintf("\n\033[1;31mError: %v\033[0m\n\n", msg)
+		m.viewport.SetContent(m.conversation)
 		m.viewport.GotoBottom()
 		return m, nil
 
