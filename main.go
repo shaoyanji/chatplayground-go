@@ -18,7 +18,7 @@ import (
 	"github.com/shaoyanji/chatplayground-go/pkg/tui"
 )
 
-const Version = "1.2.1"
+const Version = "1.2.2"
 
 // stdoutIsTTY decides whether the decorations are for a human. A pipe gets the
 // answer and nothing else: `cpg chat ... | jev-decide classify --text-file -`
@@ -60,6 +60,7 @@ COMMANDS:
   models, list [--json]         List all available models on ChatPlayground
                                 (--json adds entitlement fields: premium_only …)
   status [--json]               Auth state, user and credential age
+  usage [--json]                What the plan allows, and what is left of it
   compare, benchmark <prompt>   Run parallel benchmark across Claude Sonnet 5, DeepSeek R1 & Gemini Flash
   image <prompt>                Generate image with GPT Image 2
   tui                           Launch interactive Bubble Tea terminal UI
@@ -91,6 +92,7 @@ EXAMPLES:
   # 5. Machine-readable catalog and image result
   chatplayground-go models --json | jq '[.[] | select(.premium_only == false) | .id]'
   chatplayground-go image --json -o out.png "a red panda librarian"
+  chatplayground-go usage --json | jq '.entitlement.limits' 
 
   # 5. Interactive Bubble Tea TUI
   chatplayground-go tui
@@ -261,6 +263,63 @@ func main() {
 			return
 		}
 		fmt.Println("\033[1;32m✅ Successfully refreshed Clerk token!\033[0m")
+		return
+	}
+
+	// Command: usage
+	//
+	// The catalog's premium_only flag is global; only this endpoint says what
+	// this account may run, and how much of it is left.
+	if firstArg == "usage" {
+		fs := flag.NewFlagSet("usage", flag.ContinueOnError)
+		asJSON := fs.Bool("json", false, "Emit the entitlement, limits and counters as JSON")
+		_ = fs.Parse(args[1:])
+
+		usage, err := api.NewClient().GetUsage()
+		if err != nil {
+			if *asJSON {
+				emitJSON(map[string]any{"error": err.Error()})
+			} else {
+				fmt.Printf("\033[1;31musage error: %v\033[0m\n", err)
+			}
+			os.Exit(1)
+		}
+		if *asJSON {
+			emitJSON(usage)
+			return
+		}
+
+		ent, _ := usage["entitlement"].(map[string]any)
+		counts, _ := usage["usage"].(map[string]any)
+		limits, _ := ent["limits"].(map[string]any)
+		rates, _ := ent["rateLimits"].(map[string]any)
+
+		num := func(m map[string]any, k string) string {
+			if f, ok := m[k].(float64); ok {
+				return fmt.Sprintf("%.0f", f)
+			}
+			return "-"
+		}
+		window := func(v any) string {
+			rows, _ := v.([]any)
+			parts := make([]string, 0, len(rows))
+			for _, row := range rows {
+				if pair, ok := row.([]any); ok && len(pair) == 2 {
+					parts = append(parts, fmt.Sprintf("%v/%v", pair[0], pair[1]))
+				}
+			}
+			return strings.Join(parts, ", ")
+		}
+
+		fmt.Printf("Plan     %v / %v  (%v, %v)\n", ent["key"], ent["fullName"], ent["name"], ent["quotaModel"])
+		fmt.Printf("Images   %s used of %s limit  ·  rate %s\n",
+			num(counts, "imageGenerationsCount"), num(limits, "imageGenerations"), window(rates["image"]))
+		fmt.Printf("Prompts  %s today  ·  rate %s\n",
+			num(counts, "dailyQueriesCount"), window(rates["prompt"]))
+		fmt.Printf("Streams  %v concurrent\n", rates["concurrentStreams"])
+		if end, ok := counts["periodEnd"].(string); ok {
+			fmt.Printf("Period   ends %s\n", end)
+		}
 		return
 	}
 

@@ -60,7 +60,20 @@ chatplayground-go refresh --json
 timer turns a silent credential expiry into a failed unit instead of a surprise
 later.
 
-### 4. 🖥️ Interactive Terminal UI (TUI)
+### 4. 📊 What the plan actually allows
+`models` reports global flags; only `/api/usage` answers for this account. A
+lifetime pool reports `lifetime-pool / unlimited` and still carries its own
+rate limits and an image allowance, which is the difference between "unlimited"
+and "25 an hour":
+```bash
+chatplayground-go usage
+# Plan     lifetime-pool / lifetime  (unlimited, legacy)
+# Images   3 used of 100 limit  ·  rate 25/1h, 250/1d
+# Prompts  129 today  ·  rate 50/10m, 300/1h
+chatplayground-go usage --json | jq '.entitlement.rateLimits'
+```
+
+### 5. 🖥️ Interactive Terminal UI (TUI)
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Lip Gloss](https://github.com/charmbracelet/lipgloss), and [Glamour](https://github.com/charmbracelet/glamour):
 ```bash
 chatplayground-go tui
@@ -69,7 +82,7 @@ chatplayground-go tui
 - <kbd>Tab</kbd> to cycle between models on the fly
 - Smooth viewport scrolling with conversation memory
 
-### 5. 🎨 Image Generation
+### 6. 🎨 Image Generation
 The generator is resolved from the live catalog (`gpt-image-2.5-sunburst` and
 `-flare` on 2026-11-06); a retired id answers `400 The model is not supported`,
 which is why nothing is hardcoded.
@@ -80,7 +93,7 @@ chatplayground-go image -m gpt-image-2.5-flare --json -o icon.png "a red panda l
 `--json` prints `{id, url, prompt, model, size, path}`, and `{"error": …}` with a
 non-zero exit when generation fails.
 
-### 6. 💬 Self-Contained Chat
+### 7. 💬 Self-Contained Chat
 One process, no server, no daemon: the thread lives on the server under a
 `chatId`, the transcript is mirrored to `~/.chatplayground/sessions/<name>.json`
 (0600), and a second run with the same `-s` name resumes where you left off.
@@ -123,6 +136,7 @@ COMMANDS:
                           Self-contained streaming chat (server-side thread)
   models [--json]         Catalog; --json adds active/premium_only/tier/credit_weight
   status [--json]         Auth state, user, credential age
+  usage [--json]          Entitlement, limits and counters for this account
   refresh [--json]        Browserless Clerk token renewal; --json exits 1 on failure
   image [-m id] [--json]  Generate an image, optionally downloading it
   compare, benchmark <p>  Parallel comparison across three models

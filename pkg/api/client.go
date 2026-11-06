@@ -321,6 +321,46 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 	return fullText.String(), nil
 }
 
+// GetUsage answers what the plan allows, which the catalog cannot: its
+// `premiumOnly` flag is global, while this is per account. A lifetime pool
+// reports `key: lifetime-pool`, `name: unlimited` and its own rate limits.
+func (c *Client) GetUsage() (map[string]any, error) {
+	token := c.Token
+	if token == "" {
+		t, err := auth.GetValidToken()
+		if err != nil {
+			return nil, err
+		}
+		token = t
+	}
+
+	req, err := http.NewRequest("GET", "https://app.chatplayground.ai/api/usage", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Cookie", "__session="+token)
+	req.Header.Set("Origin", "https://web.chatplayground.ai")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("usage failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ImageResult is the generation endpoint's answer, plus the model that produced
 // it and the local file when one was requested.
 type ImageResult struct {
