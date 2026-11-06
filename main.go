@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/shaoyanji/chatplayground-go/pkg/api"
 	"github.com/shaoyanji/chatplayground-go/pkg/auth"
@@ -16,7 +18,22 @@ import (
 	"github.com/shaoyanji/chatplayground-go/pkg/tui"
 )
 
-const Version = "1.2.0"
+const Version = "1.2.1"
+
+// stdoutIsTTY decides whether the decorations are for a human. A pipe gets the
+// answer and nothing else: `cpg chat ... | jev-decide classify --text-file -`
+// must not see a prompt glyph in the text it classifies.
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// emitJSON is the machine surface: one document on stdout, nothing decorative.
+func emitJSON(v any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
 
 func printHelp() {
 	fmt.Printf(`
@@ -40,7 +57,9 @@ COMMANDS:
                                 transcript in ~/.chatplayground/sessions/
   tui                           Launch interactive Bubble Tea terminal UI
   login [token]                 Log in via stealth browser or save session token
-  models, list                  List all available models on ChatPlayground
+  models, list [--json]         List all available models on ChatPlayground
+                                (--json adds entitlement fields: premium_only …)
+  status [--json]               Auth state, user and credential age
   compare, benchmark <prompt>   Run parallel benchmark across Claude Sonnet 5, DeepSeek R1 & Gemini Flash
   image <prompt>                Generate image with GPT Image 2
   tui                           Launch interactive Bubble Tea terminal UI
@@ -68,6 +87,10 @@ EXAMPLES:
 
   # 4. Generate image
   chatplayground-go image --size 1536x1024 -o landscape.png "A peaceful cyberpunk tea shop in Tokyo"
+
+  # 5. Machine-readable catalog and image result
+  chatplayground-go models --json | jq '[.[] | select(.premium_only == false) | .id]'
+  chatplayground-go image --json -o out.png "a red panda librarian"
 
   # 5. Interactive Bubble Tea TUI
   chatplayground-go tui
@@ -151,8 +174,34 @@ func main() {
 
 	// Command: status
 	if firstArg == "status" {
+		fs := flag.NewFlagSet("status", flag.ContinueOnError)
+		asJSON := fs.Bool("json", false, "Emit one JSON object instead of text")
+		_ = fs.Parse(args[1:])
+
 		authData, err := auth.ReadAuth()
-		if err != nil || authData.Token == "" {
+		loggedIn := err == nil && authData.Token != ""
+
+		if *asJSON {
+			out := map[string]any{
+				"authenticated": loggedIn,
+				"config_file":   auth.GetAuthFilePath(),
+			}
+			if loggedIn {
+				if id, ok := authData.User["id"].(string); ok {
+					out["user_id"] = id
+				}
+				if email, ok := authData.User["email"].(string); ok {
+					out["email"] = email
+				}
+				out["session_id"] = authData.SessionID
+				out["has_client_cookie"] = authData.ClientCookie != ""
+				out["credential_age_seconds"] = (time.Now().UnixMilli() - authData.UpdatedAt) / 1000
+			}
+			emitJSON(out)
+			return
+		}
+
+		if !loggedIn {
 			fmt.Println("\033[1;33mNot logged in.\033[0m Run 'chatplayground-go login' first.")
 			return
 		}
@@ -170,34 +219,81 @@ func main() {
 	}
 
 	// Command: refresh
+	//
+	// This is the keepalive a timer runs, so it reports in the machine surface:
+	// `--json` plus a non-zero exit on failure. It never prints the token or a
+	// prefix of it — the journal is not a credential store.
 	if firstArg == "refresh" {
+		fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
+		asJSON := fs.Bool("json", false, "Emit one JSON object instead of text")
+		_ = fs.Parse(args[1:])
+
+		fail := func(err error) {
+			if *asJSON {
+				emitJSON(map[string]any{"refreshed": false, "error": err.Error()})
+			} else {
+				fmt.Printf("\033[1;31mToken refresh failed: %v\033[0m\n", err)
+			}
+			os.Exit(1)
+		}
+
 		authData, err := auth.ReadAuth()
 		if err != nil {
-			fmt.Printf("Failed to read auth: %v\n", err)
-			return
+			fail(fmt.Errorf("read %s: %w", auth.GetAuthFilePath(), err))
 		}
 		newToken, err := auth.RefreshClerkTokenREST(authData)
 		if err != nil {
-			// Fallback to background runner
+			// The background helper needs a Windows browser install; it is a
+			// last resort, not the second try on this fleet.
 			newToken, err = auth.RefreshViaBackgroundHelper()
 			if err != nil {
-				fmt.Printf("\033[1;31mToken refresh failed: %v\033[0m\n", err)
-				return
+				fail(err)
 			}
 		}
-		fmt.Println("\033[1;32m✅ Successfully refreshed Clerk token!\033[0m")
-		if len(newToken) > 30 {
-			fmt.Printf("Token prefix: %s...\n", newToken[:30])
+		if *asJSON {
+			emitJSON(map[string]any{
+				"refreshed":       true,
+				"token_present":   newToken != "",
+				"config_file":     auth.GetAuthFilePath(),
+				"session_id":      authData.SessionID,
+				"refreshed_at_ms": time.Now().UnixMilli(),
+			})
+			return
 		}
+		fmt.Println("\033[1;32m✅ Successfully refreshed Clerk token!\033[0m")
 		return
 	}
 
 	// Command: models / list
 	if firstArg == "models" || firstArg == "list" {
+		fs := flag.NewFlagSet("models", flag.ContinueOnError)
+		asJSON := fs.Bool("json", false, "Emit the catalog as JSON, entitlement fields included")
+		_ = fs.Parse(args[1:])
 		client := api.NewClient()
 		models, err := client.GetModels()
 		if err != nil {
 			fmt.Printf("\033[1;31mError fetching models: %v\033[0m\n", err)
+			return
+		}
+		if *asJSON {
+			out := make([]map[string]any, 0, len(models))
+			for _, m := range models {
+				out = append(out, map[string]any{
+					"id":            m.BotID,
+					"display_name":  m.DisplayName,
+					"provider":      m.Provider,
+					"group":         m.Group,
+					"endpoint":      m.Endpoint,
+					"vision":        m.SupportImage,
+					"active":        m.Active,
+					"premium_only":  m.PremiumOnly,
+					"lifetime_only": m.LifetimeOnly,
+					"tier":          m.Tier,
+					"credit_weight": m.CreditWeight,
+					"default":       m.BotID == repl.DefaultModel,
+				})
+			}
+			emitJSON(out)
 			return
 		}
 		fmt.Printf("\033[1mAvailable models on ChatPlayground (%d total):\033[0m\n\n", len(models))
@@ -213,6 +309,9 @@ func main() {
 			mark := ""
 			if m.BotID == "gemini-3.8-flash-l" {
 				mark = " \033[32m(default)\033[0m"
+			}
+			if m.PremiumOnly {
+				mark += " \033[31m[premium: 403]\033[0m"
 			}
 			fmt.Printf("  \033[33m%-28s\033[0m %-30s [%s]%s%s%s\n", m.BotID, m.DisplayName, m.Provider, vision, imgGen, mark)
 		}
@@ -241,6 +340,7 @@ func main() {
 			Model:   chatModel,
 			Session: chatSession,
 			Prompt:  strings.TrimSpace(strings.Join(fs.Args(), " ")),
+			Color:   stdoutIsTTY(),
 		}
 		if err := repl.Start(opts); err != nil {
 			fmt.Printf("Chat error: %v\n", err)
@@ -287,27 +387,54 @@ func main() {
 	}
 
 	// Command: image
+	//
+	// Its own flag set for the same reason `chat` has one: the global parse
+	// stops at the subcommand, so `image --size 1536x1024 -o out.png` used to
+	// send the flags to the model as the prompt.
 	if firstArg == "image" {
-		prompt := strings.Join(args[1:], " ")
+		imgSize, imgOut, imgModel, asJSON := sizeFlag, outputFlag, "", false
+		fs := flag.NewFlagSet("image", flag.ContinueOnError)
+		fs.StringVar(&imgSize, "s", imgSize, "Image size: 1024x1024, 1536x1024, 1024x1536")
+		fs.StringVar(&imgSize, "size", imgSize, "Image size")
+		fs.StringVar(&imgModel, "m", imgModel, "Image model (default: the free one in the catalog)")
+		fs.StringVar(&imgModel, "model", imgModel, "Image model")
+		fs.StringVar(&imgOut, "o", imgOut, "Write the PNG here")
+		fs.StringVar(&imgOut, "output", imgOut, "Write the PNG here")
+		fs.BoolVar(&asJSON, "json", false, "Emit url, path, size and prompt as JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			fmt.Printf("Image error: %v\n", err)
+			return
+		}
+		prompt := strings.Join(fs.Args(), " ")
 		if prompt == "" {
 			prompt = readPipedStdin()
 		}
 		if prompt == "" {
-			fmt.Println("Usage: chatplayground-go image [--size 1024x1024] [-o file.png] <prompt>")
+			fmt.Println("Usage: chatplayground-go image [--size 1024x1024] [-o file.png] [--json] <prompt>")
 			return
 		}
 
 		client := api.NewClient()
-		fmt.Printf("🎨 Generating image with GPT Image 2...\n")
-		url, err := client.GenerateImage(prompt, sizeFlag, outputFlag)
+		if !asJSON {
+			fmt.Printf("🎨 Generating image with GPT Image 2...\n")
+		}
+		res, err := client.GenerateImage(prompt, imgModel, imgSize, imgOut)
 		if err != nil {
-			fmt.Printf("\033[1;31mImage generation error: %v\033[0m\n", err)
+			if asJSON {
+				emitJSON(map[string]any{"error": err.Error()})
+			} else {
+				fmt.Printf("\033[1;31mImage generation error: %v\033[0m\n", err)
+			}
+			os.Exit(1)
+		}
+		if asJSON {
+			emitJSON(res)
 			return
 		}
-		fmt.Printf("\033[1;32m✅ Image generated successfully!\033[0m\n")
-		fmt.Printf("🖼️ URL: %s\n", url)
-		if outputFlag != "" {
-			fmt.Printf("💾 Saved to: %s\n", outputFlag)
+		fmt.Printf("\033[1;32m✅ Image generated with %s!\033[0m\n", res.Model)
+		fmt.Printf("🖼️ URL: %s\n", res.URL)
+		if res.Path != "" {
+			fmt.Printf("💾 Saved to: %s\n", res.Path)
 		}
 		return
 	}
