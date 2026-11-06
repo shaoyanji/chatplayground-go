@@ -246,13 +246,13 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 
 	// Add user message to history
 	c.Messages = append(c.Messages, Message{Role: "user", Content: userContent})
-	recentMessages := c.Messages
-	if len(recentMessages) > 20 {
-		recentMessages = recentMessages[len(recentMessages)-20:]
-	}
+	// The endpoint keeps the thread server-side, keyed by chatId, and rejects a
+	// resent transcript ("Send only the new prompt"). Send the new prompt only;
+	// c.Messages stays the local record of the conversation.
+	sendMessages := c.Messages[len(c.Messages)-1:]
 
 	payload := map[string]interface{}{
-		"messages":       recentMessages,
+		"messages":       sendMessages,
 		"model":          formattedModel,
 		"botId":          botId,
 		"chatId":         c.ChatID,

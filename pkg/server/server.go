@@ -124,35 +124,38 @@ func (m chatMessage) text() string {
 }
 
 func toUpstream(req completionRequest, emulate bool) []api.Message {
-	var out []api.Message
-	hasSystem := false
+	// The chat endpoint rejects a message list that carries history: it wants
+	// "only the new prompt", and history that it cannot tie to a chatId. Since
+	// an OpenAI client resends the whole conversation every turn, the transcript
+	// is flattened into one prompt with role labels.
+	var parts []string
 	for _, m := range req.Messages {
-		role := m.Role
-		switch role {
+		switch m.Role {
 		case "system", "developer":
-			role = "system"
-			hasSystem = true
+			parts = append(parts, "SYSTEM:\n"+m.text())
 		case "tool", "function":
-			// The upstream has no tool role; hand the result back as user text.
-			out = append(out, api.Message{Role: "user", Content: fmt.Sprintf("Tool result from %s:\n%s", m.Name, m.text())})
-			continue
+			name := m.Name
+			if name == "" {
+				name = "tool"
+			}
+			parts = append(parts, fmt.Sprintf("TOOL RESULT (%s):\n%s", name, m.text()))
 		case "assistant":
-			role = "assistant"
+			parts = append(parts, "ASSISTANT:\n"+m.text())
 		default:
-			role = "user"
+			parts = append(parts, "USER:\n"+m.text())
 		}
-		out = append(out, api.Message{Role: role, Content: m.text()})
 	}
 	if emulate && len(req.Tools) > 0 {
 		schemas, _ := json.Marshal(req.Tools)
-		protocol := toolProtocol + "\n\n" + string(schemas)
-		if hasSystem {
-			out = append(out, api.Message{Role: "system", Content: protocol})
-		} else {
-			out = append([]api.Message{{Role: "system", Content: protocol}}, out...)
-		}
+		parts = append([]string{toolProtocol + "\n\n" + string(schemas)}, parts...)
 	}
-	return out
+
+	// A lone user message goes through verbatim: wrapping it would change what
+	// the model sees for the most common request shape.
+	if len(req.Messages) == 1 && len(parts) == 1 && req.Messages[0].Role == "user" {
+		return []api.Message{{Role: "user", Content: req.Messages[0].text()}}
+	}
+	return []api.Message{{Role: "user", Content: strings.Join(parts, "\n\n")}}
 }
 
 const toolProtocol = `You can call tools.

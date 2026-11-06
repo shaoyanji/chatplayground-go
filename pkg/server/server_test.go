@@ -31,6 +31,9 @@ func stubChatPlayground(t *testing.T, reply func(w http.ResponseWriter)) *httpte
 	t.Cleanup(srv.Close)
 	t.Setenv("CHATPLAYGROUND_BASE_URL", srv.URL)
 	t.Setenv("CHATPLAYGROUND_TOKEN", "stub-token")
+	// Isolate HOME: without a session on disk the client reads the real
+	// ~/.chatplayground/auth.json, which would make these tests machine-dependent.
+	t.Setenv("HOME", t.TempDir())
 	return srv
 }
 
