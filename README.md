@@ -66,6 +66,19 @@ Generate images and download them directly:
 chatplayground-go image --size 1536x1024 -o city.png "A peaceful cyberpunk tea shop in Kyoto"
 ```
 
+### 6. 💬 Self-Contained Chat
+One process, no server, no daemon: the thread lives on the server under a
+`chatId`, the transcript is mirrored to `~/.chatplayground/sessions/<name>.json`
+(0600), and a second run with the same `-s` name resumes where you left off.
+```bash
+chatplayground-go chat                      # interactive, session "default"
+chatplayground-go chat -m gpt-6-luna -s work
+chatplayground-go chat -s work "and what did I just ask?"   # one-shot, same thread
+```
+Inside the prompt: `/new` (fresh thread), `/model <id>`, `/models`, `/status`,
+`/exit`. Only the new prompt is ever sent — the endpoint keeps the conversation
+and rejects a resent transcript — so a long chat costs one message per turn.
+
 ---
 
 ## 📦 Building & Installation
