@@ -4,9 +4,17 @@ import (
 	"testing"
 
 	"github.com/shaoyanji/chatplayground-go/pkg/api"
+	"github.com/shaoyanji/chatplayground-go/pkg/auth"
 )
 
 func TestMultiTurnThreadRetention(t *testing.T) {
+	// This test talks to the live service, so it needs a session on disk and
+	// must never run in CI. Skipping beats failing on a machine that is simply
+	// not logged in.
+	if _, err := auth.ReadAuth(); err != nil {
+		t.Skip("no ChatPlayground session on this machine; run 'chatplayground-go login'")
+	}
+
 	client := api.NewClient()
 
 	// Turn 1:

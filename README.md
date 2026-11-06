@@ -109,6 +109,45 @@ OPTIONS:
 
 ---
 
+## 🛰️ OpenAI-compatible API
+
+`chatplayground-go serve` exposes the same account as a standard OpenAI endpoint,
+so an OpenAI-compatible client or an agent harness can use a base URL instead of
+a CLI.
+
+```bash
+chatplayground-go serve                                    # http://127.0.0.1:8787/v1
+chatplayground-go serve --addr 0.0.0.0:8787 --tools-emulate
+```
+
+| Endpoint | What it does |
+| :--- | :--- |
+| `GET /v1/models` | Model ids from the live catalog. Public, no token needed. |
+| `POST /v1/chat/completions` | Chat, streamed or not. Accepts OpenAI `messages`. |
+| `GET /healthz` | Liveness. |
+
+Authentication is the session the CLI already keeps in `~/.chatplayground/auth.json`
+(`chatplayground-go login`); `CHATPLAYGROUND_TOKEN` overrides it. Renewal is the
+pure-REST Clerk refresh, so the server needs no Node, Chromium or Playwright.
+
+**Tool calls.** The chat endpoint returns plain text and has no `tools` support,
+so tool calling is emulated and off by default. With `--tools-emulate` the tool
+schemas are sent in a system message, the model answers with a fenced
+`tool_call` block, and that block is returned as an OpenAI `tool_calls` field with
+`finish_reason: "tool_calls"`. Replies are buffered when the flag is on, because a
+half-parsed call would be delivered as prose. Without the flag, `tools` are
+ignored and the model's text comes back untouched.
+
+Point a client at it with the base URL and any key:
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+export OPENAI_API_KEY=local
+```
+
+Model ids are the catalog's `botId` values (`gemini-3.8-flash-l`,
+`claude-haiku-5-5`, `deepseek-v4.1-flash`, …); `GET /v1/models` lists them.
+
 ## 🏗️ Architecture
 
 ```

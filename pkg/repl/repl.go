@@ -18,7 +18,7 @@ func Start(defaultModel string) error {
 
 	fmt.Println("\033[1;36m=== ChatPlayground Interactive CLI ===\033[0m")
 	fmt.Printf("🤖 Model: \033[1;32m%s\033[0m\n", defaultModel)
-	fmt.Println("💡 Commands: \033[35m/model <id>\033[0m, \033[35m/models\033[0m, \033[35m/new\033[0m, \033[35m/status\033[0m, \033[35m/clear\033[0m, \033[35m/exit\033[0m\n")
+	fmt.Print("💡 Commands: \033[35m/model <id>\033[0m, \033[35m/models\033[0m, \033[35m/new\033[0m, \033[35m/status\033[0m, \033[35m/clear\033[0m, \033[35m/exit\033[0m\n\n")
 
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -53,7 +53,7 @@ func Start(defaultModel string) error {
 
 			case "/new", "/clear", "/reset":
 				client.ResetSession()
-				fmt.Println("\033[1;33mConversation cleared and started new thread.\033[0m\n")
+				fmt.Print("\033[1;33mConversation cleared and started new thread.\033[0m\n\n")
 				continue
 
 			case "/status":
@@ -99,7 +99,7 @@ func Start(defaultModel string) error {
 		if err != nil {
 			fmt.Printf("\n\033[1;31mError: %v\033[0m\n", err)
 		}
-		fmt.Println("\n")
+		fmt.Print("\n\n")
 	}
 
 	return nil
