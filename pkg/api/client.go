@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,6 +38,10 @@ type ImageUrl struct {
 	Detail string `json:"detail"`
 }
 
+// ModelInfo is the catalog entry, not just what the table prints. The
+// entitlement fields are the point: a `premiumOnly` id answers 403 "only
+// available to active subscribers", so a caller that prints the catalog without
+// them is advertising models it cannot use.
 type ModelInfo struct {
 	BotID        string `json:"botId"`
 	ModelName    string `json:"modelName"`
@@ -45,6 +50,12 @@ type ModelInfo struct {
 	Endpoint     string `json:"endpoint"`
 	SupportImage bool   `json:"supportImage"`
 	Group        string `json:"group"`
+	Active       bool   `json:"active"`
+	PremiumOnly  bool   `json:"premiumOnly"`
+	LifetimeOnly bool   `json:"lifetimeOnly"`
+	Tier         string `json:"tier"`
+	CreditWeight int    `json:"creditWeight"`
+	SortIndex    int    `json:"sortIndex"`
 }
 
 type Client struct {
@@ -310,79 +321,120 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 	return fullText.String(), nil
 }
 
-func (c *Client) GenerateImage(prompt string, size string, outputPath string) (string, error) {
-	token := c.Token
-	if token == "" {
-		var err error
-		token, err = auth.GetValidToken()
-		if err != nil {
-			return "", err
+// ImageResult is the generation endpoint's answer, plus the model that produced
+// it and the local file when one was requested.
+type ImageResult struct {
+	ID     string `json:"id"`
+	URL    string `json:"url"`
+	Prompt string `json:"prompt"`
+	Model  string `json:"model"`
+	Size   string `json:"size"`
+	Path   string `json:"path,omitempty"`
+}
+
+// PickImageModel resolves the generator from the live catalog. The endpoint path
+// carries the model id, and ids are retired without notice: the hardcoded
+// `gpt-image-2` answered 400 "The model is not supported" on 2026-11-06, while
+// the catalog offered gpt-image-2.5-sunburst and -flare.
+func (c *Client) PickImageModel(preferred string) string {
+	if preferred != "" {
+		return preferred
+	}
+	if models, err := c.GetModels(); err == nil {
+		for _, m := range models {
+			if m.Group == "image" && m.Active && !m.PremiumOnly {
+				return m.BotID
+			}
 		}
 	}
+	return "gpt-image-2.5-sunburst"
+}
 
-	if size == "" {
-		size = "1024x1024"
+func (c *Client) GenerateImage(prompt string, model string, size string, outputPath string) (ImageResult, error) {
+	res := ImageResult{Prompt: prompt, Model: c.PickImageModel(model), Size: size}
+	if res.Size == "" {
+		res.Size = "1024x1024"
 	}
 
-	payload := map[string]interface{}{
-		"prompt": prompt,
-		"apiKey": "",
-		"model":  "gpt-image-2",
-		"size":   size,
+	attempt := func() (*http.Response, error) {
+		token := c.Token
+		if token == "" {
+			t, err := auth.GetValidToken()
+			if err != nil {
+				return nil, err
+			}
+			token = t
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"prompt": prompt,
+			"apiKey": "",
+			"model":  res.Model,
+			"size":   res.Size,
+		})
+		endpoint := "https://app.chatplayground.ai/api/generate-image/" + url.PathEscape(res.Model)
+		req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "__session="+token)
+		req.Header.Set("Origin", "https://web.chatplayground.ai")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		return c.HTTPClient.Do(req)
 	}
 
-	payloadBytes, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", "https://app.chatplayground.ai/api/generate-image/gpt-image-2", bytes.NewBuffer(payloadBytes))
+	resp, err := attempt()
 	if err != nil {
-		return "", err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("Cookie", fmt.Sprintf("__session=%s", token))
-	req.Header.Set("Origin", "https://web.chatplayground.ai")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return "", err
+		return res, err
 	}
 	defer resp.Body.Close()
 
+	// 401 is a stale 60-second token, not a lost session: mint and retry once.
+	// The retired node helper is never the answer here — it needs a Windows
+	// browser install and silently returns nothing everywhere else.
 	if resp.StatusCode == http.StatusUnauthorized {
-		newToken, err := auth.RefreshViaBackgroundHelper()
-		if err == nil && newToken != "" {
-			c.Token = newToken
-			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", newToken))
-			req.Header.Set("Cookie", fmt.Sprintf("__session=%s", newToken))
-			resp.Body.Close()
-			resp, err = c.HTTPClient.Do(req)
-			if err != nil {
-				return "", err
+		if data, rerr := auth.ReadAuth(); rerr == nil {
+			if t, rerr := auth.RefreshClerkTokenREST(data); rerr == nil && t != "" {
+				c.Token = t
+				resp.Body.Close()
+				resp, err = attempt()
+				if err != nil {
+					return res, err
+				}
+				defer resp.Body.Close()
 			}
-			defer resp.Body.Close()
 		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("image generation failed with status %d", resp.StatusCode)
+		// The endpoint names its own failure ("The model is not supported");
+		// dropping the body turned that into a bare code.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return res, fmt.Errorf("image generation failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	var res struct {
-		Url string `json:"url"`
+	var body struct {
+		ID     string `json:"id"`
+		URL    string `json:"url"`
+		Prompt string `json:"prompt"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", err
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return res, err
 	}
+	res.ID, res.URL = body.ID, body.URL
 
-	if outputPath != "" && res.Url != "" {
-		imgResp, err := http.Get(res.Url)
-		if err == nil {
-			defer imgResp.Body.Close()
-			imgData, _ := io.ReadAll(imgResp.Body)
-			_ = os.WriteFile(outputPath, imgData, 0644)
+	if outputPath != "" && res.URL != "" {
+		imgResp, err := http.Get(res.URL)
+		if err != nil {
+			return res, fmt.Errorf("generated at %s but could not download it: %w", res.URL, err)
 		}
+		defer imgResp.Body.Close()
+		data, _ := io.ReadAll(imgResp.Body)
+		if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+			return res, err
+		}
+		res.Path = outputPath
 	}
-
-	return res.Url, nil
+	return res, nil
 }

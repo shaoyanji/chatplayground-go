@@ -24,14 +24,20 @@
 ## 🚀 Key Capabilities
 
 ### 1. ⚡ Instant Cold Start & Pipeline Workflows
-Perfect for Git hooks, shell scripts, and hotkey automation where Node startup overhead is noticeable:
-```bash
-# Instant code review on your current git diff
-git diff | chatplayground-go "Review this diff for memory leaks and edge cases"
+Perfect for Git hooks, shell scripts, and hotkey automation where Node startup overhead is noticeable.
+Piped stdin is used when no prompt argument is given, so a task that needs both
+carries its material in the prompt:
 
-# Piping logs
+```bash
+chatplayground-go "Review this diff for memory leaks and edge cases:
+$(git diff)"
+
+# A prompt is not required: the piped text is the prompt
 tail -n 50 /var/log/app.log | chatplayground-go "Diagnose the fatal crash"
 ```
+
+When stdout is not a TTY the reply is written bare — no prompt glyph, no colour —
+so it can be piped straight into another tool.
 
 ### 2. 🏁 Parallel Multi-Model Benchmarking
 Query **Claude Sonnet 5**, **DeepSeek R1**, and **ChatGPT-5.6 Sol** simultaneously via goroutines and channels:
@@ -47,9 +53,12 @@ POST https://clerk.chatplayground.ai/v1/client/sessions/{sessionId}/tokens
 Cookie: __session=...
 ```
 ```bash
-# Force a manual REST token refresh:
-chatplayground-go refresh
+# Mint a token now; --json is the form a timer or a health probe reads
+chatplayground-go refresh --json
 ```
+`refresh --json` exits non-zero when the stored session is dead, so an hourly
+timer turns a silent credential expiry into a failed unit instead of a surprise
+later.
 
 ### 4. 🖥️ Interactive Terminal UI (TUI)
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Lip Gloss](https://github.com/charmbracelet/lipgloss), and [Glamour](https://github.com/charmbracelet/glamour):
@@ -60,11 +69,16 @@ chatplayground-go tui
 - <kbd>Tab</kbd> to cycle between models on the fly
 - Smooth viewport scrolling with conversation memory
 
-### 5. 🎨 GPT Image 2 Generation
-Generate images and download them directly:
+### 5. 🎨 Image Generation
+The generator is resolved from the live catalog (`gpt-image-2.5-sunburst` and
+`-flare` on 2026-11-06); a retired id answers `400 The model is not supported`,
+which is why nothing is hardcoded.
 ```bash
 chatplayground-go image --size 1536x1024 -o city.png "A peaceful cyberpunk tea shop in Kyoto"
+chatplayground-go image -m gpt-image-2.5-flare --json -o icon.png "a red panda librarian"
 ```
+`--json` prints `{id, url, prompt, model, size, path}`, and `{"error": …}` with a
+non-zero exit when generation fails.
 
 ### 6. 💬 Self-Contained Chat
 One process, no server, no daemon: the thread lives on the server under a
@@ -105,19 +119,32 @@ USAGE:
   chatplayground-go <command> [options]
 
 COMMANDS:
-  compare, benchmark <p>  Run parallel benchmark across Claude Sonnet 5, DeepSeek R1 & GPT-5.6
-  image <prompt>          Generate image with GPT Image 2
-  tui                     Launch interactive Bubble Tea terminal UI
-  status                  Check authentication credentials and expiry
-  refresh                 Perform browserless pure-REST Clerk token renewal
+  chat, repl [-m id] [-s name] [prompt]
+                          Self-contained streaming chat (server-side thread)
+  models [--json]         Catalog; --json adds active/premium_only/tier/credit_weight
+  status [--json]         Auth state, user, credential age
+  refresh [--json]        Browserless Clerk token renewal; --json exits 1 on failure
+  image [-m id] [--json]  Generate an image, optionally downloading it
+  compare, benchmark <p>  Parallel comparison across three models
+  tui                     Interactive Bubble Tea terminal UI
+  serve [--addr] [--tools-emulate]
+                          OpenAI-compatible /v1 endpoint
 
 OPTIONS:
-  -m, --model <id>        Target model (default: claude-sonnet-5-l)
+  -m, --model <id>        Target model
   -i, --image <path/url>  Input image for multimodal vision
   -s, --size <size>       Image size: 1024x1024, 1536x1024, 1024x1536
   -o, --output <file>     Download path for image generation
   -h, --help              Show help
   -v, --version           Show version
+```
+
+`--json` is the machine surface: one document on stdout and nothing decorative.
+`models --json` is the entitlement view — `premium_only` ids answer
+`403 only available to active subscribers`:
+
+```bash
+chatplayground-go models --json | jq -r '.[] | select(.premium_only | not) | .id'
 ```
 
 ---

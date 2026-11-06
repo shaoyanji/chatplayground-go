@@ -28,6 +28,9 @@ type Options struct {
 	Model   string // empty means: the session's model, else DefaultModel
 	Session string // session file name; empty means "default"
 	Prompt  string // non-empty means one-shot: send, print, save, exit
+	// Color is false when stdout is not a TTY: a piped one-shot then writes the
+	// reply and nothing else, so it can be classified or diffed as plain text.
+	Color bool
 }
 
 // Session is the on-disk state: the server thread id plus the local transcript.
@@ -105,7 +108,7 @@ func Start(opts Options) error {
 	client.Messages = sess.Messages
 
 	if opts.Prompt != "" {
-		return turn(client, sess, opts.Prompt, os.Stdout, true)
+		return turn(client, sess, opts.Prompt, os.Stdout, opts.Color, true)
 	}
 
 	fmt.Println("\033[1;36m=== chatplayground — self-contained chat ===\033[0m")
@@ -129,7 +132,7 @@ func Start(opts Options) error {
 		}
 
 		if !strings.HasPrefix(line, "/") {
-			_ = turn(client, sess, line, os.Stdout, false)
+			_ = turn(client, sess, line, os.Stdout, true, false)
 			continue
 		}
 
@@ -192,14 +195,16 @@ thread id; the transcript here is a local mirror (0600) for resume and status.
 
 // turn sends one prompt and prints the reply. A thread the server no longer
 // knows is retried once on a fresh chatId: losing context beats a dead session.
-func turn(client *api.Client, sess *Session, prompt string, out io.Writer, oneShot bool) error {
-	reply, err := send(client, sess, prompt, out)
+func turn(client *api.Client, sess *Session, prompt string, out io.Writer, color bool, oneShot bool) error {
+	reply, err := send(client, sess, prompt, out, color)
 	if staleThread(err) {
-		fmt.Print("\n\033[1;33m↻ server forgot this thread; starting a new one\033[0m\n\n")
+		if color {
+			fmt.Print("\n\033[1;33m↻ server forgot this thread; starting a new one\033[0m\n\n")
+		}
 		client.ResetSession()
-		reply, err = send(client, sess, prompt, out)
+		reply, err = send(client, sess, prompt, out, color)
 	}
-	if oneShot {
+	if oneShot && color {
 		fmt.Fprintln(out)
 	}
 	if err != nil {
@@ -217,8 +222,10 @@ func turn(client *api.Client, sess *Session, prompt string, out io.Writer, oneSh
 	return nil
 }
 
-func send(client *api.Client, sess *Session, prompt string, out io.Writer) (string, error) {
-	fmt.Fprintf(out, "\n\033[1;36m%s>\033[0m ", shortModel(sess.Model))
+func send(client *api.Client, sess *Session, prompt string, out io.Writer, color bool) (string, error) {
+	if color {
+		fmt.Fprintf(out, "\n\033[1;36m%s>\033[0m ", shortModel(sess.Model))
+	}
 	return client.StreamQuery(sess.Model, prompt, "", func(chunk string) {
 		fmt.Fprint(out, chunk)
 	})
