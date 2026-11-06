@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,8 +55,17 @@ type Client struct {
 }
 
 func NewClient() *Client {
+	// HTTP/1.1 on purpose. With the default transport (HTTP/2) the endpoint
+	// answers a follow-up turn on an existing chatId with 400 "Send only the new
+	// prompt. Conversation history is not accepted." — measured 3/3 failures
+	// with HTTP/2 and 3/3 successes with ForceAttemptHTTP2 off, same payload,
+	// same token. Keep the negotiation off here rather than special-casing 400.
+	transport := &http.Transport{
+		ForceAttemptHTTP2:   false,
+		MaxIdleConnsPerHost: 1,
+	}
 	return &Client{
-		HTTPClient: &http.Client{Timeout: 120 * time.Second},
+		HTTPClient: &http.Client{Timeout: 120 * time.Second, Transport: transport},
 	}
 }
 
@@ -151,87 +161,14 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 		}
 	}
 
-	// Model normalization (default: gemini-3.8-flash-l for maximum speed)
-	formattedModel := "google/gemini-3.8-flash"
-	botId := "gemini-3.8-flash-l"
-	endpoint := "https://app.chatplayground.ai/api/chat/azure"
-
-	cleanModel := strings.ToLower(strings.TrimSpace(model))
-	switch {
-	// GLM 5.3 models (Z.ai) - Pareto frontier
-	case strings.Contains(cleanModel, "glm") || cleanModel == "z-ai" || cleanModel == "zai":
-		botId = "glm-5.3-flash"
-		formattedModel = "z-ai/glm-5.3-flash"
-		endpoint = "https://app.chatplayground.ai/api/chat/lmsys"
-
-	// DeepSeek V4 Flash
-	case strings.Contains(cleanModel, "v4-flash") || strings.Contains(cleanModel, "deepseek-flash"):
-		botId = "deepseek-v4-flash"
-		formattedModel = "deepseek/deepseek-v4-flash"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	// DeepSeek R1 (reasoner with think tags)
-	case strings.Contains(cleanModel, "r1") || strings.Contains(cleanModel, "reasoner"):
-		botId = "deepseek-r1"
-		formattedModel = "deepseek/deepseek-r1-0528"
-		endpoint = "https://app.chatplayground.ai/api/chat/lmsys"
-
-	// DeepSeek V4 Pro (default for "deepseek", "v4") - fast frontier reasoning in lieu of r1
-	case strings.Contains(cleanModel, "deepseek") || strings.Contains(cleanModel, "v4"):
-		botId = "deepseek-v4-pro"
-		formattedModel = "deepseek/deepseek-v4-pro"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	// Claude Sonnet 5
-	case strings.Contains(cleanModel, "claude") || strings.Contains(cleanModel, "sonnet"):
-		botId = "claude-sonnet-5-l"
-		formattedModel = "anthropic/claude-sonnet-5"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	// Gemini 3.8 Flash
-	case strings.Contains(cleanModel, "gemini") || cleanModel == "flash":
-		botId = "gemini-3.8-flash-l"
-		formattedModel = "google/gemini-3.8-flash"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	// OpenAI GPT-5.6 Sol
-	case strings.Contains(cleanModel, "gpt") || strings.Contains(cleanModel, "sol"):
-		botId = "gpt-5.6-sol"
-		formattedModel = "openai/gpt-5.6-sol"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	// Grok 4.6
-	case strings.Contains(cleanModel, "grok"):
-		botId = "grok-4.6"
-		formattedModel = "xai/grok-4.6"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	// LLaMA 4 Maverick
-	case strings.Contains(cleanModel, "llama") || strings.Contains(cleanModel, "maverick"):
-		botId = "llama-4-maverick"
-		formattedModel = "meta/llama-4-maverick"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	// Qwen 3.8 Max
-	case strings.Contains(cleanModel, "qwen"):
-		botId = "qwen3.8-max"
-		formattedModel = "qwen/qwen3.8-max"
-		endpoint = "https://app.chatplayground.ai/api/chat/azure"
-
-	default:
-		if cleanModel == "" {
-			botId = "gemini-3.8-flash-l"
-			formattedModel = "google/gemini-3.8-flash"
-			endpoint = "https://app.chatplayground.ai/api/chat/azure"
-		} else {
-			botId = cleanModel
-			formattedModel = cleanModel
-			endpoint = "https://app.chatplayground.ai/api/chat/azure"
-			if strings.Contains(cleanModel, "glm") || cleanModel == "deepseek-r1" {
-				endpoint = "https://app.chatplayground.ai/api/chat/lmsys"
-			}
-		}
-	}
+	// One resolver, shared with Chat(). The hand-written switch this replaced
+	// had a botId per family and had gone stale — `-m gpt-6-luna` resolved to
+	// gpt-5.6-sol and the endpoint answered "Model not supported". The catalog
+	// is authoritative, so ask it.
+	target := ResolveTarget(context.Background(), model)
+	formattedModel := target.Model
+	botId := target.BotID
+	endpoint := target.Endpoint
 
 	var userContent interface{} = prompt
 	if imagePath != "" {
@@ -246,13 +183,13 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 
 	// Add user message to history
 	c.Messages = append(c.Messages, Message{Role: "user", Content: userContent})
-	recentMessages := c.Messages
-	if len(recentMessages) > 20 {
-		recentMessages = recentMessages[len(recentMessages)-20:]
-	}
+	// The endpoint keeps the thread server-side, keyed by chatId, and rejects a
+	// resent transcript ("Send only the new prompt"). Send the new prompt only;
+	// c.Messages stays the local record of the conversation.
+	sendMessages := c.Messages[len(c.Messages)-1:]
 
 	payload := map[string]interface{}{
-		"messages":       recentMessages,
+		"messages":       sendMessages,
 		"model":          formattedModel,
 		"botId":          botId,
 		"chatId":         c.ChatID,
@@ -297,7 +234,14 @@ func (c *Client) StreamQuery(model string, prompt string, imagePath string, onCh
 
 	// Auto-retry once on 401 Unauthorized
 	if resp.StatusCode == http.StatusUnauthorized {
-		newToken, err := auth.RefreshViaBackgroundHelper()
+		// REST mint only: RefreshViaBackgroundHelper shells out to a node script
+		// with a hardcoded Windows path, which cannot work on a headless host and
+		// turns a clear 401 into a mystery. The `__client` cookie in auth.json is
+		// what makes an unattended refresh possible at all.
+		var newToken string
+		if stored, aerr := auth.ReadAuth(); aerr == nil {
+			newToken, err = auth.RefreshClerkTokenREST(stored)
+		}
 		if err == nil && newToken != "" {
 			c.Token = newToken
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", newToken))

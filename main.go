@@ -12,10 +12,11 @@ import (
 	"github.com/shaoyanji/chatplayground-go/pkg/auth"
 	"github.com/shaoyanji/chatplayground-go/pkg/benchmark"
 	"github.com/shaoyanji/chatplayground-go/pkg/repl"
+	"github.com/shaoyanji/chatplayground-go/pkg/server"
 	"github.com/shaoyanji/chatplayground-go/pkg/tui"
 )
 
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 func printHelp() {
 	fmt.Printf(`
@@ -33,7 +34,10 @@ USAGE:
   chatplayground-go <command> [options]
 
 COMMANDS:
-  chat, repl                    Interactive streaming chat in your terminal (multi-turn context)
+  chat, repl [-m id] [-s name] [prompt]
+                                Self-contained streaming chat: no server, no
+                                daemon; the thread is kept server side and the
+                                transcript in ~/.chatplayground/sessions/
   tui                           Launch interactive Bubble Tea terminal UI
   login [token]                 Log in via stealth browser or save session token
   models, list                  List all available models on ChatPlayground
@@ -42,6 +46,7 @@ COMMANDS:
   tui                           Launch interactive Bubble Tea terminal UI
   status                        Check authentication credentials and active user
   refresh                       Perform token renewal
+  serve [--addr host:port]      Serve an OpenAI-compatible API at /v1 (--tools-emulate for tool calls)
 
 OPTIONS:
   -m, --model <id>              Target model (default: gemini-3.8-flash-l)
@@ -217,9 +222,29 @@ func main() {
 	}
 
 	// Command: chat / repl
+	//
+	// Its own flag set, because flag.Parse stops at the first non-flag argument:
+	// `chat -m gpt-6-luna` used to keep the default model and silently ignore the
+	// flag. Same for --session.
 	if firstArg == "chat" || firstArg == "repl" {
-		if err := repl.Start(modelFlag); err != nil {
+		chatModel, chatSession := "", "default"
+		fs := flag.NewFlagSet("chat", flag.ContinueOnError)
+		fs.StringVar(&chatModel, "m", "", "Model id")
+		fs.StringVar(&chatModel, "model", "", "Model id")
+		fs.StringVar(&chatSession, "s", "default", "Session name (resumes if it exists)")
+		fs.StringVar(&chatSession, "session", "default", "Session name (resumes if it exists)")
+		if err := fs.Parse(args[1:]); err != nil {
 			fmt.Printf("Chat error: %v\n", err)
+			return
+		}
+		opts := repl.Options{
+			Model:   chatModel,
+			Session: chatSession,
+			Prompt:  strings.TrimSpace(strings.Join(fs.Args(), " ")),
+		}
+		if err := repl.Start(opts); err != nil {
+			fmt.Printf("Chat error: %v\n", err)
+			os.Exit(1)
 		}
 		return
 	}
@@ -228,6 +253,21 @@ func main() {
 	if firstArg == "tui" {
 		if err := tui.Start(); err != nil {
 			fmt.Printf("TUI error: %v\n", err)
+		}
+		return
+	}
+
+	// Command: serve
+	if firstArg == "serve" {
+		addr := "127.0.0.1:8787"
+		emulateTools := false
+		fs := flag.NewFlagSet("serve", flag.ExitOnError)
+		fs.StringVar(&addr, "addr", addr, "Address to listen on")
+		fs.BoolVar(&emulateTools, "tools-emulate", false, "Convert fenced tool_call replies into OpenAI tool_calls")
+		_ = fs.Parse(args[1:])
+		if err := server.Start(server.Config{Addr: addr, ToolsEmulate: emulateTools}); err != nil {
+			fmt.Printf("serve error: %v\n", err)
+			os.Exit(1)
 		}
 		return
 	}

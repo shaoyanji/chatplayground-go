@@ -14,11 +14,17 @@ import (
 )
 
 type AuthData struct {
-	Token         string                 `json:"token"`
-	SessionID     string                 `json:"sessionId"`
-	SessionCookie string                 `json:"sessionCookie"`
-	User          map[string]interface{} `json:"user"`
-	UpdatedAt     int64                  `json:"updatedAt"`
+	Token         string `json:"token"`
+	SessionID     string `json:"sessionId"`
+	SessionCookie string `json:"sessionCookie"`
+	// ClientCookie is Clerk's `__client` token. It is the durable credential:
+	// it mints session tokens and is not rotated by doing so, where the session
+	// cookie dies after a minute and its refresh chain belongs to whichever
+	// client used it last. Optional, because a login that only produced a
+	// session cookie still works for as long as that session lives.
+	ClientCookie string                 `json:"clientCookie,omitempty"`
+	User         map[string]interface{} `json:"user"`
+	UpdatedAt    int64                  `json:"updatedAt"`
 }
 
 func GetConfigDir() string {
@@ -87,11 +93,18 @@ func RefreshClerkTokenREST(auth *AuthData) (string, error) {
 	req.Header.Set("Origin", "https://web.chatplayground.ai")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	cookieVal := auth.SessionCookie
-	if cookieVal == "" {
-		cookieVal = auth.Token
+	uat := auth.UpdatedAt / 1000
+	if auth.ClientCookie != "" {
+		// Mint from the client token: no rotation, so a server and an open
+		// browser tab can share one session without signing each other out.
+		req.Header.Set("Cookie", fmt.Sprintf("__client=%s; __client_uat=%d", auth.ClientCookie, uat))
+	} else {
+		cookieVal := auth.SessionCookie
+		if cookieVal == "" {
+			cookieVal = auth.Token
+		}
+		req.Header.Set("Cookie", fmt.Sprintf("__session=%s; __client_uat=%d", cookieVal, uat))
 	}
-	req.Header.Set("Cookie", fmt.Sprintf("__session=%s; __client_uat=%d", cookieVal, auth.UpdatedAt/1000))
 
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)

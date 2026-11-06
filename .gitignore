@@ -1,17 +1,4 @@
-# Binaries
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+cpg-bin
+dbg-bin
 chatplayground-go
-
-# Local config and credentials
-auth.json
-*.local.json
-.env
-.env.*
-
-# OS files
-.DS_Store
-Thumbs.db
+*.exe
