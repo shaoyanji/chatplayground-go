@@ -12,6 +12,7 @@ import (
 	"github.com/shaoyanji/chatplayground-go/pkg/auth"
 	"github.com/shaoyanji/chatplayground-go/pkg/benchmark"
 	"github.com/shaoyanji/chatplayground-go/pkg/repl"
+	"github.com/shaoyanji/chatplayground-go/pkg/server"
 	"github.com/shaoyanji/chatplayground-go/pkg/tui"
 )
 
@@ -42,6 +43,7 @@ COMMANDS:
   tui                           Launch interactive Bubble Tea terminal UI
   status                        Check authentication credentials and active user
   refresh                       Perform token renewal
+  serve [--addr host:port]      Serve an OpenAI-compatible API at /v1 (--tools-emulate for tool calls)
 
 OPTIONS:
   -m, --model <id>              Target model (default: gemini-3.8-flash-l)
@@ -228,6 +230,21 @@ func main() {
 	if firstArg == "tui" {
 		if err := tui.Start(); err != nil {
 			fmt.Printf("TUI error: %v\n", err)
+		}
+		return
+	}
+
+	// Command: serve
+	if firstArg == "serve" {
+		addr := "127.0.0.1:8787"
+		emulateTools := false
+		fs := flag.NewFlagSet("serve", flag.ExitOnError)
+		fs.StringVar(&addr, "addr", addr, "Address to listen on")
+		fs.BoolVar(&emulateTools, "tools-emulate", false, "Convert fenced tool_call replies into OpenAI tool_calls")
+		_ = fs.Parse(args[1:])
+		if err := server.Start(server.Config{Addr: addr, ToolsEmulate: emulateTools}); err != nil {
+			fmt.Printf("serve error: %v\n", err)
+			os.Exit(1)
 		}
 		return
 	}
